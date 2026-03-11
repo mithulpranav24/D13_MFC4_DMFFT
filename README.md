@@ -185,6 +185,8 @@ Edge transition: -20 → 80 → 80 → 80 → -20  (sharp, crisp)
 - Environmental Monitoring: Enhance satellite imagery for deforestation tracking, crop health assessment, and disaster mapping
 - Urban Planning: Improve resolution of aerial photographs for infrastructure development
 - Climate Research: Clarify atmospheric patterns and ocean surface features
+3. Traffic Monitoring:
+- Enhance images from traffic cameras to make vehicles, roads, and signals clearer. This helps in better traffic management, accident analysis, and road safety monitoring.
 
 ## References
 - Yu, C., Han, C., & Zhang, C. (2025). DMFFT: Improving the generation quality of diffusion models using fast Fourier transform. Scientific Reports, 15, 10200. https://doi.org/10.1038/s41598-025-94381-8
