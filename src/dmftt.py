@@ -404,11 +404,13 @@ def register_tune_crossattn_upblock2d(model, types=0,
             return hidden_states
 
         return forward
-
+    crossattn_count = 0
     for upsample_block in model.unet.up_blocks:
         if isinstance_str(upsample_block, "CrossAttnUpBlock2D"):
-            upsample_block.forward = up_forward(upsample_block)
-            _set_attrs(
+            crossattn_count += 1
+            if crossattn_count == 3:
+                upsample_block.forward = up_forward(upsample_block)
+                _set_attrs(
                 upsample_block,
                 types=types,
                 k1=k1, b1=b1, t1=t1, s1=s1,
