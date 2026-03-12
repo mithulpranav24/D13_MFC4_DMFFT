@@ -1,12 +1,13 @@
-import argparse
 import os
+import re
+import textwrap
+from datetime import datetime
 
-import numpy
 import torch
 import torch.fft as fft
 from diffusers import StableDiffusionPipeline
 from diffusers.utils import is_torch_version
-
+from PIL import Image, ImageDraw, ImageFont
 
 def isinstance_str(x, cls_name):
     for _cls in x.__class__.__mro__:
@@ -14,9 +15,10 @@ def isinstance_str(x, cls_name):
             return True
     return False
 
+def fourier_filter(x, threshold, scale, verbose=False):
+    if threshold <= 0:
+        return x
 
-def fourier_filter(x, threshold, scale):
-    """Simple frequency domain filtering - scales low frequencies."""
     dtype = x.dtype
     x = x.type(torch.float32)
 
@@ -27,349 +29,203 @@ def fourier_filter(x, threshold, scale):
     mask = torch.ones((B, C, H, W), device=x.device, dtype=torch.float32)
 
     crow, ccol = H // 2, W // 2
-    top = max(0, crow - threshold)
+    top    = max(0, crow - threshold)
     bottom = min(H, crow + threshold)
-    left = max(0, ccol - threshold)
-    right = min(W, ccol + threshold)
+    left   = max(0, ccol - threshold)
+    right  = min(W, ccol + threshold)
+
+    if verbose:
+        lf_mean = torch.abs(x_freq[..., top:bottom, left:right]).mean().item()
+        hf_mask = torch.ones_like(x_freq, dtype=torch.bool)
+        hf_mask[..., top:bottom, left:right] = False
+        hf_mean = torch.abs(x_freq[hf_mask]).mean().item()
+        print("  [fourier_filter] LF mean={:.4f}  HF mean={:.4f}  "
+              "region=[{}:{}, {}:{}]  scale={}".format(
+                  lf_mean, hf_mean, top, bottom, left, right, scale))
 
     mask[..., top:bottom, left:right] = scale
     x_freq = x_freq * mask
 
-    x_freq = fft.ifftshift(x_freq, dim=(-2, -1))
+    x_freq     = fft.ifftshift(x_freq, dim=(-2, -1))
     x_filtered = fft.ifftn(x_freq, dim=(-2, -1)).real
-    x_filtered = x_filtered.type(dtype)
+    return x_filtered.type(dtype)
 
-    return x_filtered
-
-
-def fourier_solo(x, global_scale=1.0, freq_threshold=0, lf_scale=1.0, hf_scale=1.0,
-                 amplitude_scale=1.0, phase_scale=1.0, blend_type=0):
-    
+def fourier_solo(x, global_scale=1.0, freq_threshold=1,
+                 lf_scale=1.0, hf_scale=1.0,
+                 amplitude_scale=1.0, phase_scale=1.0,
+                 blend_type=0, verbose=False):
     dtype = x.dtype
     x = x.type(torch.float32)
-    
-    # Apply global scale
     x = x * global_scale
 
-    # Early return if no FFT processing needed
-    if blend_type == -1:
+    if blend_type == -1 or freq_threshold <= 0:
         return x.type(dtype)
 
-    # Perform FFT
     x_freq = fft.fftn(x, dim=(-2, -1))
     x_freq = fft.fftshift(x_freq, dim=(-2, -1))
 
     B, C, H, W = x_freq.shape
-    
-    # Calculate center and bounds for low-frequency region
+
     crow, ccol = H // 2, W // 2
-    top = max(0, crow - freq_threshold)
+    top    = max(0, crow - freq_threshold)
     bottom = min(H, crow + freq_threshold)
-    left = max(0, ccol - freq_threshold)
-    right = min(W, ccol + freq_threshold)
+    left   = max(0, ccol - freq_threshold)
+    right  = min(W, ccol + freq_threshold)
 
-    
-    
-    # Extract amplitude and phase from the original frequency domain
     amplitude = torch.abs(x_freq)
-    phase = torch.angle(x_freq)
+    phase     = torch.angle(x_freq)
 
-    # Apply different scaling strategies based on blend_type
+    if verbose:
+        lf_amp_mean = amplitude[..., top:bottom, left:right].mean().item()
+        hf_mask     = torch.ones_like(amplitude, dtype=torch.bool)
+        hf_mask[..., top:bottom, left:right] = False
+        hf_amp_mean = amplitude[hf_mask].mean().item()
+        print("  [fourier_solo]   LF amp={:.4f}  HF amp={:.4f}  "
+              "region=[{}:{}, {}:{}]  blend={}".format(
+                  lf_amp_mean, hf_amp_mean, top, bottom, left, right, blend_type))
+
     if blend_type == 0:
-        # Scale all frequencies uniformly (amplitude and phase)
         amplitude = amplitude * amplitude_scale
-        phase = phase * phase_scale
-    elif blend_type == 1:
-        # Scale only low frequencies
-        amplitude_lf = amplitude[..., top:bottom, left:right] * amplitude_scale
-        phase_lf = phase[..., top:bottom, left:right] * phase_scale
-        amplitude[..., top:bottom, left:right] = amplitude_lf
-        phase[..., top:bottom, left:right] = phase_lf
-    elif blend_type == 2:
-        # Scale high frequencies only, preserve low frequencies unchanged
-        # Save low freq first
-        lf_amplitude = amplitude[..., top:bottom, left:right].clone()
-        lf_phase = phase[..., top:bottom, left:right].clone()
-        
-        # Scale everything
-        amplitude = amplitude * amplitude_scale
-        phase = phase * phase_scale
-        
-        # Restore low freq
-        amplitude[..., top:bottom, left:right] = lf_amplitude
-        phase[..., top:bottom, left:right] = lf_phase
-    elif blend_type == 3:
-        # Scale low freq amplitude, high freq phase
-        amplitude_lf = amplitude[..., top:bottom, left:right] * amplitude_scale
-        amplitude[..., top:bottom, left:right] = amplitude_lf
-        
-        lf_phase = phase[..., top:bottom, left:right].clone()
-        phase = phase * phase_scale
-        phase[..., top:bottom, left:right] = lf_phase
-    elif blend_type == 4:
-        # Scale high freq amplitude, low freq phase
-        lf_amplitude = amplitude[..., top:bottom, left:right].clone()
-        amplitude = amplitude * amplitude_scale
-        amplitude[..., top:bottom, left:right] = lf_amplitude
-        
-        phase_lf = phase[..., top:bottom, left:right] * phase_scale
-        phase[..., top:bottom, left:right] = phase_lf
+        phase     = phase * phase_scale
 
-    # NOW apply frequency scaling if specified (lf_scale/hf_scale)
-    # This is separate from amplitude/phase scaling
+    elif blend_type == 1:
+        amplitude[..., top:bottom, left:right] = (
+            amplitude[..., top:bottom, left:right] * amplitude_scale)
+        phase[..., top:bottom, left:right] = (
+            phase[..., top:bottom, left:right] * phase_scale)
+
+    elif blend_type == 2:
+        lf_amp   = amplitude[..., top:bottom, left:right].clone()
+        lf_phase = phase[..., top:bottom, left:right].clone()
+        amplitude = amplitude * amplitude_scale
+        phase     = phase * phase_scale
+        amplitude[..., top:bottom, left:right] = lf_amp
+        phase[..., top:bottom, left:right]     = lf_phase
+
+    elif blend_type == 3:
+        amplitude[..., top:bottom, left:right] = (
+            amplitude[..., top:bottom, left:right] * amplitude_scale)
+        lf_phase = phase[..., top:bottom, left:right].clone()
+        phase    = phase * phase_scale
+        phase[..., top:bottom, left:right] = lf_phase
+
+    elif blend_type == 4:
+        lf_amp = amplitude[..., top:bottom, left:right].clone()
+        amplitude = amplitude * amplitude_scale
+        amplitude[..., top:bottom, left:right] = lf_amp
+        phase[..., top:bottom, left:right] = (
+            phase[..., top:bottom, left:right] * phase_scale)
+
     if lf_scale != 1.0 or hf_scale != 1.0:
         freq_mask = torch.ones((B, C, H, W), device=x.device, dtype=torch.float32)
         freq_mask[...] = hf_scale
         freq_mask[..., top:bottom, left:right] = lf_scale
         amplitude = amplitude * freq_mask
 
-    # Reconstruct complex frequency representation
-    reals = amplitude * torch.cos(phase)
-    imags = amplitude * torch.sin(phase)
+    reals      = amplitude * torch.cos(phase)
+    imags      = amplitude * torch.sin(phase)
     x_freq_new = torch.complex(reals, imags)
 
-    # Inverse FFT
     x_freq_new = fft.ifftshift(x_freq_new, dim=(-2, -1))
     x_filtered = fft.ifftn(x_freq_new, dim=(-2, -1)).real
-    
-    x_filtered = x_filtered.type(dtype)
-
-    return x_filtered
-
+    return x_filtered.type(dtype)
 
 def _set_attrs(block, **kwargs):
     for k, v in kwargs.items():
         setattr(block, k, v)
 
-
-def register_tune_upblock2d(model, types=0,
-                            k1=0.5, b1=1.2, t1=1, s1=0.9,
-                            k1_1=0.5, b1_1=1.2, t1_1=1, s1_1=0.9,
-                            k2=0.5, b2=1.4, t2=1, s2=0.2,
-                            k2_1=0.5, b2_1=1.4, t2_1=1, s2_1=0.2,
-                            g1=1.0, g2=1.0, g1_1=1.0, g2_1=1.0,
-                            blend1=0, blend2=0, blend1_1=0, blend2_1=0,
-                            a1=1.0, a2=1.0, a1_1=1.0, a2_1=1.0,
-                            p1=1.0, p2=1.0, p1_1=1.0, p2_1=1.0,
-                            skips=0, tunes=0):
-    def up_forward(self):
-        def forward(hidden_states, res_hidden_states_tuple, temb=None, upsample_size=None):
-            skipping = 0
-            finetune = 0
-
-            for resnet in self.resnets:
-                res_hidden_states = res_hidden_states_tuple[-1]
-                res_hidden_states_tuple = res_hidden_states_tuple[:-1]
-
-                if self.types == 1:
-                    if hidden_states.shape[1] == 1280:
-                        hidden_states[:, :int(hidden_states.shape[1] * self.k1)] *= self.b1
-                        res_hidden_states = fourier_filter(res_hidden_states, threshold=self.t1, scale=self.s1)
-                    if hidden_states.shape[1] == 640:
-                        hidden_states[:, :int(hidden_states.shape[1] * self.k2)] *= self.b2
-                        res_hidden_states = fourier_filter(res_hidden_states, threshold=self.t2, scale=self.s2)
-                elif self.types == 2:
-                    if skipping >= self.skips and finetune < self.tunes:
-                        hidden_states[:, :int(hidden_states.shape[1] * self.k1)] *= self.b1
-                        res_hidden_states[:, :int(res_hidden_states.shape[1] * self.k1_1)] *= self.s1
-                        finetune += 1
-                elif self.types == 4:
-                    if skipping >= self.skips and finetune < self.tunes:
-                        if self.k1 > 0.0:
-                            hidden_states[:, :int(hidden_states.shape[1] * self.k1)] = fourier_solo(
-                                hidden_states[:, :int(hidden_states.shape[1] * self.k1)],
-                                global_scale=self.g1, freq_threshold=self.t1,
-                                lf_scale=self.b1, hf_scale=self.s1,
-                                amplitude_scale=self.a1, phase_scale=self.p1,
-                                blend_type=self.blend1,
-                            )
-                        if self.k1_1 > 0.0:
-                            res_hidden_states[:, :int(res_hidden_states.shape[1] * self.k1_1)] = fourier_solo(
-                                res_hidden_states[:, :int(res_hidden_states.shape[1] * self.k1_1)],
-                                global_scale=self.g1_1, freq_threshold=self.t1_1,
-                                lf_scale=self.b1_1, hf_scale=self.s1_1,
-                                amplitude_scale=self.a1_1, phase_scale=self.p1_1,
-                                blend_type=self.blend1_1,
-                            )
-                        finetune += 1
-                elif self.types == 5:
-                    if skipping >= self.skips and finetune < self.tunes:
-                        if hidden_states.shape[1] == 1280:
-                            if self.k1 > 0.0:
-                                hidden_states[:, :int(hidden_states.shape[1] * self.k1)] = fourier_solo(
-                                    hidden_states[:, :int(hidden_states.shape[1] * self.k1)],
-                                    global_scale=self.g1, freq_threshold=self.t1,
-                                    lf_scale=self.b1, hf_scale=self.s1,
-                                    amplitude_scale=self.a1, phase_scale=self.p1,
-                                    blend_type=self.blend1,
-                                )
-                            if self.k1_1 > 0.0:
-                                res_hidden_states[:, :int(res_hidden_states.shape[1] * self.k1_1)] = fourier_solo(
-                                    res_hidden_states[:, :int(res_hidden_states.shape[1] * self.k1_1)],
-                                    global_scale=self.g1_1, freq_threshold=self.t1_1,
-                                    lf_scale=self.b1_1, hf_scale=self.s1_1,
-                                    amplitude_scale=self.a1_1, phase_scale=self.p1_1,
-                                    blend_type=self.blend1_1,
-                                )
-                        if hidden_states.shape[1] == 640:
-                            if self.k2 > 0.0:
-                                hidden_states[:, :int(hidden_states.shape[1] * self.k2)] = fourier_solo(
-                                    hidden_states[:, :int(hidden_states.shape[1] * self.k2)],
-                                    global_scale=self.g2, freq_threshold=self.t2,
-                                    lf_scale=self.b2, hf_scale=self.s2,
-                                    amplitude_scale=self.a2, phase_scale=self.p2,
-                                    blend_type=self.blend2,
-                                )
-                            if self.k2_1 > 0.0:
-                                res_hidden_states[:, :int(res_hidden_states.shape[1] * self.k2_1)] = fourier_solo(
-                                    res_hidden_states[:, :int(res_hidden_states.shape[1] * self.k2_1)],
-                                    global_scale=self.g2_1, freq_threshold=self.t2_1,
-                                    lf_scale=self.b2_1, hf_scale=self.s2_1,
-                                    amplitude_scale=self.a2_1, phase_scale=self.p2_1,
-                                    blend_type=self.blend2_1,
-                                )
-                        finetune += 1
-
-                hidden_states = torch.cat([hidden_states, res_hidden_states], dim=1)
-
-                if self.training and self.gradient_checkpointing:
-                    def create_custom_forward(module):
-                        def custom_forward(*inputs):
-                            return module(*inputs)
-                        return custom_forward
-
-                    if is_torch_version(">=", "1.11.0"):
-                        hidden_states = torch.utils.checkpoint.checkpoint(
-                            create_custom_forward(resnet), hidden_states, temb, use_reentrant=False
-                        )
-                    else:
-                        hidden_states = torch.utils.checkpoint.checkpoint(
-                            create_custom_forward(resnet), hidden_states, temb
-                        )
-                else:
-                    hidden_states = resnet(hidden_states, temb)
-
-                skipping += 1
-
-            if self.upsamplers is not None:
-                for upsampler in self.upsamplers:
-                    hidden_states = upsampler(hidden_states, upsample_size)
-
-            return hidden_states
-
-        return forward
-
-    for upsample_block in model.unet.up_blocks:
-        if isinstance_str(upsample_block, "UpBlock2D"):
-            upsample_block.forward = up_forward(upsample_block)
-            _set_attrs(
-                upsample_block,
-                types=types,
-                k1=k1, b1=b1, t1=t1, s1=s1,
-                k2=k2, b2=b2, t2=t2, s2=s2,
-                k1_1=k1_1, b1_1=b1_1, t1_1=t1_1, s1_1=s1_1,
-                k2_1=k2_1, b2_1=b2_1, t2_1=t2_1, s2_1=s2_1,
-                g1=g1, g2=g2, g1_1=g1_1, g2_1=g2_1,
-                blend1=blend1, blend2=blend2, blend1_1=blend1_1, blend2_1=blend2_1,
-                a1=a1, a2=a2, a1_1=a1_1, a2_1=a2_1,
-                p1=p1, p2=p2, p1_1=p1_1, p2_1=p2_1,
-                skips=skips, tunes=tunes,
-            )
-
-
-def register_tune_crossattn_upblock2d(model, types=0,
-                                      k1=0.5, b1=1.2, t1=1, s1=0.9,
-                                      k1_1=0.5, b1_1=1.2, t1_1=1, s1_1=0.9,
-                                      k2=0.5, b2=1.4, t2=1, s2=0.2,
+def register_tune_crossattn_upblock2d(model, use_fft=True, verbose=False,
+                                      types=0,
+                                      k2=0.5,   b2=1.4,  t2=1,   s2=0.2,
                                       k2_1=0.5, b2_1=1.4, t2_1=1, s2_1=0.2,
-                                      g1=1.0, g2=1.0, g1_1=1.0, g2_1=1.0,
-                                      blend1=0, blend2=0, blend1_1=0, blend2_1=0,
-                                      a1=1.0, a2=1.0, a1_1=1.0, a2_1=1.0,
-                                      p1=1.0, p2=1.0, p1_1=1.0, p2_1=1.0,
-                                      skips=0, tunes=0):
-    def up_forward(self):
+                                      g2=1.0,   g2_1=1.0,
+                                      blend2=0, blend2_1=0,
+                                      a2=1.0,   a2_1=1.0,
+                                      p2=1.0,   p2_1=1.0,
+                                      skips=0,  tunes=0):
+    def up_forward(block):
         def forward(hidden_states, res_hidden_states_tuple, temb=None,
                     encoder_hidden_states=None, cross_attention_kwargs=None,
-                    upsample_size=None, attention_mask=None, encoder_attention_mask=None):
+                    upsample_size=None, attention_mask=None,
+                    encoder_attention_mask=None):
+
             skipping = 0
             finetune = 0
 
-            for resnet, attn in zip(self.resnets, self.attentions):
-                res_hidden_states = res_hidden_states_tuple[-1]
+            for resnet, attn in zip(block.resnets, block.attentions):
+                res_hidden_states       = res_hidden_states_tuple[-1]
                 res_hidden_states_tuple = res_hidden_states_tuple[:-1]
 
-                if self.types == 1:
-                    if hidden_states.shape[1] == 1280:
-                        hidden_states[:, :int(hidden_states.shape[1] * self.k1)] *= self.b1
-                        res_hidden_states = fourier_filter(res_hidden_states, threshold=self.t1, scale=self.s1)
-                    if hidden_states.shape[1] == 640:
-                        hidden_states[:, :int(hidden_states.shape[1] * self.k2)] *= self.b2
-                        res_hidden_states = fourier_filter(res_hidden_states, threshold=self.t2, scale=self.s2)
-                elif self.types == 2:
-                    if skipping >= self.skips and finetune < self.tunes:
-                        hidden_states[:, :int(hidden_states.shape[1] * self.k2)] *= self.b2
-                        res_hidden_states[:, :int(res_hidden_states.shape[1] * self.k2_1)] *= self.s2
-                        finetune += 1
-                elif self.types == 4:
-                    if skipping >= self.skips and finetune < self.tunes:
-                        if self.k2 > 0.0:
-                            hidden_states[:, :int(hidden_states.shape[1] * self.k2)] = fourier_solo(
-                                hidden_states[:, :int(hidden_states.shape[1] * self.k2)],
-                                global_scale=self.g2, freq_threshold=self.t2,
-                                lf_scale=self.b2, hf_scale=self.s2,
-                                amplitude_scale=self.a2, phase_scale=self.p2,
-                                blend_type=self.blend2,
-                            )
-                        if self.k2_1 > 0.0:
-                            res_hidden_states[:, :int(res_hidden_states.shape[1] * self.k2_1)] = fourier_solo(
-                                res_hidden_states[:, :int(res_hidden_states.shape[1] * self.k2_1)],
-                                global_scale=self.g2_1, freq_threshold=self.t2_1,
-                                lf_scale=self.b2_1, hf_scale=self.s2_1,
-                                amplitude_scale=self.a2_1, phase_scale=self.p2_1,
-                                blend_type=self.blend2_1,
-                            )
-                        finetune += 1
-                elif self.types == 5:
-                    if skipping >= self.skips and finetune < self.tunes:
-                        if hidden_states.shape[1] == 1280:
-                            if self.k1 > 0.0:
-                                hidden_states[:, :int(hidden_states.shape[1] * self.k1)] = fourier_solo(
-                                    hidden_states[:, :int(hidden_states.shape[1] * self.k1)],
-                                    global_scale=self.g1, freq_threshold=self.t1,
-                                    lf_scale=self.b1, hf_scale=self.s1,
-                                    amplitude_scale=self.a1, phase_scale=self.p1,
-                                    blend_type=self.blend1,
-                                )
-                            if self.k1_1 > 0.0:
-                                res_hidden_states[:, :int(res_hidden_states.shape[1] * self.k1_1)] = fourier_solo(
-                                    res_hidden_states[:, :int(res_hidden_states.shape[1] * self.k1_1)],
-                                    global_scale=self.g1_1, freq_threshold=self.t1_1,
-                                    lf_scale=self.b1_1, hf_scale=self.s1_1,
-                                    amplitude_scale=self.a1_1, phase_scale=self.p1_1,
-                                    blend_type=self.blend1_1,
-                                )
-                        if hidden_states.shape[1] == 640:
-                            if self.k2 > 0.0:
-                                hidden_states[:, :int(hidden_states.shape[1] * self.k2)] = fourier_solo(
-                                    hidden_states[:, :int(hidden_states.shape[1] * self.k2)],
-                                    global_scale=self.g2, freq_threshold=self.t2,
-                                    lf_scale=self.b2, hf_scale=self.s2,
-                                    amplitude_scale=self.a2, phase_scale=self.p2,
-                                    blend_type=self.blend2,
-                                )
-                            if self.k2_1 > 0.0:
-                                res_hidden_states[:, :int(res_hidden_states.shape[1] * self.k2_1)] = fourier_solo(
-                                    res_hidden_states[:, :int(res_hidden_states.shape[1] * self.k2_1)],
-                                    global_scale=self.g2_1, freq_threshold=self.t2_1,
-                                    lf_scale=self.b2_1, hf_scale=self.s2_1,
-                                    amplitude_scale=self.a2_1, phase_scale=self.p2_1,
-                                    blend_type=self.blend2_1,
-                                )
-                        finetune += 1
+                if use_fft:
+                    C = hidden_states.shape[1]
+
+                    if block.types == 1:
+                        hidden_states[:, :int(C * block.k2)] *= block.b2
+                        res_hidden_states = fourier_filter(
+                            res_hidden_states,
+                            threshold=block.t2, scale=block.s2,
+                            verbose=verbose)
+
+                    elif block.types == 2:
+                        tunes_limit = block.tunes if block.tunes > 0 else float('inf')
+                        if skipping >= block.skips and finetune < tunes_limit:
+                            hidden_states[:, :int(C * block.k2)] *= block.b2
+                            res_hidden_states[:, :int(
+                                res_hidden_states.shape[1] * block.k2_1)] *= block.s2
+                            finetune += 1
+
+                    elif block.types == 3:
+                        import numpy as _np
+                        hs_np  = hidden_states.to('cpu').detach().float().numpy()
+                        avg    = _np.mean(hs_np, axis=1)
+                        hs_max = _np.max(avg, axis=(1, 2))
+                        hs_min = _np.min(avg, axis=(1, 2))
+                        n = int(C * block.k2)
+                        for idx in range(hidden_states.shape[0]):
+                            span = max(hs_max[idx] - hs_min[idx], 1e-6)
+                            hidden_states[idx, :n] *= (block.b2 * span)
+                        res_hidden_states = fourier_filter(
+                            res_hidden_states,
+                            threshold=block.t2, scale=block.s2,
+                            verbose=verbose)
+
+                    elif block.types == 4:
+                        tunes_limit = block.tunes if block.tunes > 0 else float('inf')
+                        if skipping >= block.skips and finetune < tunes_limit:
+                            hidden_states = fourier_solo(
+                                hidden_states,
+                                global_scale=block.g2, freq_threshold=block.t2,
+                                lf_scale=block.s2,     hf_scale=block.b2,
+                                amplitude_scale=block.a2, phase_scale=block.p2,
+                                blend_type=block.blend2, verbose=verbose)
+                            res_hidden_states = fourier_solo(
+                                res_hidden_states,
+                                global_scale=block.g2_1, freq_threshold=block.t2_1,
+                                lf_scale=block.s2_1,     hf_scale=block.b2_1,
+                                amplitude_scale=block.a2_1, phase_scale=block.p2_1,
+                                blend_type=block.blend2_1, verbose=verbose)
+                            finetune += 1
+
+                    elif block.types == 5:
+                        hidden_states = fourier_solo(
+                            hidden_states,
+                            global_scale=block.g2, freq_threshold=block.t2,
+                            lf_scale=block.s2,     hf_scale=block.b2,
+                            amplitude_scale=block.a2, phase_scale=block.p2,
+                            blend_type=block.blend2, verbose=verbose)
+                        res_hidden_states = fourier_solo(
+                            res_hidden_states,
+                            global_scale=block.g2_1, freq_threshold=block.t2_1,
+                            lf_scale=block.s2_1,     hf_scale=block.b2_1,
+                            amplitude_scale=block.a2_1, phase_scale=block.p2_1,
+                            blend_type=block.blend2_1, verbose=verbose)
 
                 hidden_states = torch.cat([hidden_states, res_hidden_states], dim=1)
 
-                if self.training and self.gradient_checkpointing:
+                use_gc = (block.training and
+                          getattr(block, "gradient_checkpointing", False))
+
+                if use_gc:
                     def create_custom_forward(module, return_dict=None):
                         def custom_forward(*inputs):
                             if return_dict is not None:
@@ -377,15 +233,16 @@ def register_tune_crossattn_upblock2d(model, types=0,
                             return module(*inputs)
                         return custom_forward
 
-                    ckpt_kwargs = {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
+                    ckpt_kwargs = ({"use_reentrant": False}
+                                   if is_torch_version(">=", "1.11.0") else {})
                     hidden_states = torch.utils.checkpoint.checkpoint(
-                        create_custom_forward(resnet), hidden_states, temb, **ckpt_kwargs
-                    )
+                        create_custom_forward(resnet),
+                        hidden_states, temb, **ckpt_kwargs)
                     hidden_states = torch.utils.checkpoint.checkpoint(
                         create_custom_forward(attn, return_dict=False),
                         hidden_states, encoder_hidden_states, None, None,
-                        cross_attention_kwargs, attention_mask, encoder_attention_mask,
-                        **ckpt_kwargs,
+                        cross_attention_kwargs, attention_mask,
+                        encoder_attention_mask, **ckpt_kwargs,
                     )[0]
                 else:
                     hidden_states = resnet(hidden_states, temb)
@@ -397,134 +254,223 @@ def register_tune_crossattn_upblock2d(model, types=0,
 
                 skipping += 1
 
-            if self.upsamplers is not None:
-                for upsampler in self.upsamplers:
+            if block.upsamplers is not None:
+                for upsampler in block.upsamplers:
                     hidden_states = upsampler(hidden_states, upsample_size)
 
             return hidden_states
 
         return forward
+
     crossattn_count = 0
     for upsample_block in model.unet.up_blocks:
         if isinstance_str(upsample_block, "CrossAttnUpBlock2D"):
             crossattn_count += 1
             if crossattn_count == 3:
-                upsample_block.forward = up_forward(upsample_block)
                 _set_attrs(
-                upsample_block,
-                types=types,
-                k1=k1, b1=b1, t1=t1, s1=s1,
-                k2=k2, b2=b2, t2=t2, s2=s2,
-                k1_1=k1_1, b1_1=b1_1, t1_1=t1_1, s1_1=s1_1,
-                k2_1=k2_1, b2_1=b2_1, t2_1=t2_1, s2_1=s2_1,
-                g1=g1, g2=g2, g1_1=g1_1, g2_1=g2_1,
-                blend1=blend1, blend2=blend2, blend1_1=blend1_1, blend2_1=blend2_1,
-                a1=a1, a2=a2, a1_1=a1_1, a2_1=a2_1,
-                p1=p1, p2=p2, p1_1=p1_1, p2_1=p2_1,
-                skips=skips, tunes=tunes,
-            )
-
+                    upsample_block,
+                    types=types,
+                    k2=k2,       b2=b2,       t2=t2,       s2=s2,
+                    k2_1=k2_1,   b2_1=b2_1,   t2_1=t2_1,   s2_1=s2_1,
+                    g2=g2,       g2_1=g2_1,
+                    blend2=blend2,     blend2_1=blend2_1,
+                    a2=a2,       a2_1=a2_1,
+                    p2=p2,       p2_1=p2_1,
+                    skips=skips, tunes=tunes,
+                )
+                upsample_block.forward = up_forward(upsample_block)
+                break
 
 def _load_pipeline(model_id, device, dtype, disable_safety_checker=False):
     kwargs = {"torch_dtype": dtype}
-
     if disable_safety_checker:
         kwargs.update({"safety_checker": None, "feature_extractor": None})
 
     pipe = StableDiffusionPipeline.from_pretrained(model_id, **kwargs)
 
     if disable_safety_checker:
-        pipe.safety_checker = None
+        pipe.safety_checker          = None
         pipe.requires_safety_checker = False
 
-    pipe = pipe.to(device)
-    return pipe
+    return pipe.to(device)
 
+def _load_font(size):
+    candidates = [
+        "arial.ttf", "Arial.ttf",
+        "C:/Windows/Fonts/arial.ttf",
+        "C:/Windows/Fonts/segoeui.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/System/Library/Fonts/Helvetica.ttc",
+    ]
+    for path in candidates:
+        try:
+            return ImageFont.truetype(path, size)
+        except (IOError, OSError):
+            continue
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:
+        return ImageFont.load_default()
 
-def _apply_dmfft(pipe, params):
-    register_tune_upblock2d(pipe, **params)
-    register_tune_crossattn_upblock2d(pipe, **params)
+def _textsize(draw, text, font):
+    try:
+        bbox = draw.textbbox((0, 0), text, font=font)
+        return bbox[2] - bbox[0], bbox[3] - bbox[1]
+    except AttributeError:
+        return draw.textsize(text, font=font)
 
+def _prompt_slug(prompt, max_len=40):
+    slug = prompt.lower()
+    slug = re.sub(r"[^a-z0-9 ]", "", slug)
+    slug = re.sub(r"\s+", "_", slug.strip())
+    return slug[:max_len]
+
+def _save_comparison(img_baseline, img_dmfft, prompt, out_dir, index):
+    img_w, img_h = img_dmfft.size
+
+    if img_baseline.size != img_dmfft.size:
+        img_baseline = img_baseline.resize(img_dmfft.size, Image.LANCZOS)
+
+    LABEL_H  = 40
+    FOOTER_H = 60
+    GAP      = 6
+
+    canvas_w = img_w * 2 + GAP
+    canvas_h = LABEL_H + img_h + FOOTER_H
+
+    canvas = Image.new("RGB", (canvas_w, canvas_h), (14, 14, 20))
+    draw   = ImageDraw.Draw(canvas)
+
+    font_label  = _load_font(16)
+    font_footer = _load_font(13)
+
+    draw.rectangle([0,           0, img_w - 1,   LABEL_H], fill=(36, 36, 48))
+    draw.rectangle([img_w + GAP, 0, canvas_w - 1, LABEL_H], fill=(12, 38, 84))
+
+    def _centre_text(text, x0, x1, y0, y1, font, color):
+        tw, th = _textsize(draw, text, font)
+        draw.text(
+            (x0 + (x1 - x0 - tw) // 2, y0 + (y1 - y0 - th) // 2),
+            text, font=font, fill=color)
+
+    _centre_text("Original (Baseline)", 0, img_w, 0, LABEL_H,
+                 font_label, (185, 185, 200))
+    _centre_text("DMFFT Enhanced", img_w + GAP, canvas_w, 0, LABEL_H,
+                 font_label, (80, 180, 255))
+
+    canvas.paste(img_baseline, (0,           LABEL_H))
+    canvas.paste(img_dmfft,    (img_w + GAP, LABEL_H))
+
+    draw.rectangle([img_w, 0, img_w + GAP - 1, LABEL_H + img_h],
+                   fill=(44, 44, 56))
+
+    footer_y = LABEL_H + img_h
+    draw.rectangle([0, footer_y, canvas_w, canvas_h], fill=(10, 10, 14))
+    draw.rectangle([0, footer_y, canvas_w, footer_y + 1], fill=(48, 48, 60))
+
+    max_chars = max(40, canvas_w // 9)
+    lines     = textwrap.wrap('"{}"'.format(prompt), width=max_chars)
+    LINE_H    = 18
+    total_h   = len(lines) * LINE_H
+    ty        = footer_y + max(4, (FOOTER_H - total_h) // 2)
+
+    for i, line in enumerate(lines):
+        tw, _ = _textsize(draw, line, font_footer)
+        draw.text(((canvas_w - tw) // 2, ty + i * LINE_H),
+                  line, font=font_footer, fill=(150, 150, 168))
+
+    ts       = datetime.now().strftime("%Y%m%d_%H%M%S")
+    slug     = _prompt_slug(prompt)
+    filename = os.path.join(
+        out_dir, "dmfft_{:03d}_{}_{}.png".format(index, slug, ts))
+    canvas.save(filename)
+    return filename
+
+def _save_grid(comparison_paths, out_dir):
+    images = [Image.open(p) for p in comparison_paths]
+    w      = images[0].width
+    h_each = images[0].height
+    total_h = h_each * len(images)
+
+    grid = Image.new("RGB", (w, total_h), (10, 10, 14))
+    for i, img in enumerate(images):
+        grid.paste(img, (0, i * h_each))
+
+    ts       = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = os.path.join(out_dir, "dmfft_grid_{}.png".format(ts))
+    grid.save(filename)
+    return filename
+
+def _run_prompt(pipe, prompt, seed, steps, dmfft_params, verbose, out_dir, index):
+    print("\n  Prompt {}: {}".format(index, prompt))
+    print("  Seed  : {}".format(seed))
+
+    print("  [1/2] Baseline...")
+    register_tune_crossattn_upblock2d(
+        pipe, use_fft=False, verbose=verbose, **dmfft_params)
+    torch.manual_seed(seed)
+    img_baseline = pipe(prompt, num_inference_steps=steps).images[0]
+
+    print("  [2/2] DMFFT...")
+    register_tune_crossattn_upblock2d(
+        pipe, use_fft=True, verbose=verbose, **dmfft_params)
+    torch.manual_seed(seed)
+    img_dmfft = pipe(prompt, num_inference_steps=steps).images[0]
+
+    out_path = _save_comparison(
+        img_baseline, img_dmfft, prompt, out_dir, index)
+    print("  [OK]  Saved -> {}".format(out_path))
+    return out_path
 
 def main():
-    parser = argparse.ArgumentParser(description="DMFFT - Fixed FFT implementation")
-    parser.add_argument("--prompt", required=True)
-    parser.add_argument("--steps", type=int, default=25)
-    parser.add_argument("--seed", type=int, default=880)
-    parser.add_argument("--model", default="runwayml/stable-diffusion-v1-5")
-    parser.add_argument("--device", default="auto")
-    parser.add_argument("--out", default="dmfft_fixed.png")
-    parser.add_argument("--out-baseline", default="baseline_fixed.png")
-    parser.add_argument("--no-baseline", action="store_true")
-    parser.add_argument("--disable-safety-checker", action="store_true")
-    parser.add_argument("--types", type=int, default=None, help="Override DMFFT type (1, 2, 4, 5)")
-    args = parser.parse_args()
+    PROMPTS = [
+        "a lone lighthouse on a rocky coast during a storm, dramatic lighting",
+        "a Japanese tea ceremony in a bamboo garden, soft morning light",
+        "a giant sea turtle swimming through a coral reef, underwater photography",
+        "a vintage steam train crossing a snow-covered mountain bridge",
+        "a street market in Marrakech at dusk, vibrant colors and lanterns",
+        "a wolf howling on a frozen tundra under the northern lights",
+        "a close-up portrait of an old fisherman with weathered skin and kind eyes",
+        "a child reading a glowing book in a dark enchanted forest",
+    ]
 
-    if args.device == "auto":
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-    else:
-        device = args.device
+    SEED    = 880
+    STEPS   = 25
+    MODEL   = "runwayml/stable-diffusion-v1-5"
+    OUT_DIR = "results"
 
-    dtype = torch.float16 if device == "cuda" else torch.float32
-    
-    print(f"Loading model {args.model} on {device}...")
-    pipe = _load_pipeline(
-        args.model,
-        device,
-        dtype,
-        disable_safety_checker=args.disable_safety_checker,
-    )
-
-    # Baseline (no DMFFT)
-    baseline_params = dict(
-        types=0,  # 0 = disabled
-        k1=0.0, b1=1.0, t1=0, s1=1.0,
-        k1_1=0.0, b1_1=1.0, t1_1=0, s1_1=1.0,
-        k2=0.0, b2=1.0, t2=0, s2=1.0,
-        k2_1=0.0, b2_1=1.0, t2_1=0, s2_1=1.0,
-        g1=1.0, g2=1.0, g1_1=1.0, g2_1=1.0,
-        blend1=0, blend2=0, blend1_1=0, blend2_1=0,
-        a1=1.0, a2=1.0, a1_1=1.0, a2_1=1.0,
-        p1=1.0, p2=1.0, p1_1=1.0, p2_1=1.0,
+    dmfft_params = dict(
+        types=1,
+        k2=0.3, b2=1.1, t2=1, s2=0.95,
+        k2_1=0.3, b2_1=1.1, t2_1=1, s2_1=0.95,
+        g2=1.0, g2_1=1.0,
+        blend2=0, blend2_1=0,
+        a2=1.0, a2_1=1.0,
+        p2=1.0, p2_1=1.0,
         skips=0, tunes=0,
     )
 
-    # DMFFT params - using conservative settings from the paper
-    # Type 1 is simpler and more stable than type 4
-    dmfft_params = dict(
-        types=1,  # Use type 1 (simpler frequency filtering)
-        k1=0.5, b1=1.2, t1=1, s1=0.9,
-        k1_1=0.5, b1_1=1.2, t1_1=1, s1_1=0.9,
-        k2=0.5, b2=1.2, t2=1, s2=0.8,
-        k2_1=0.5, b2_1=1.2, t2_1=1, s2_1=0.8,
-        g1=1.0, g2=1.0, g1_1=1.0, g2_1=1.0,
-        blend1=0, blend2=0, blend1_1=0, blend2_1=0,
-        a1=1.0, a2=1.0, a1_1=1.0, a2_1=1.0,
-        p1=1.0, p2=1.0, p1_1=1.0, p2_1=1.0,
-        skips=0, tunes=10,
-    )
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    dtype  = torch.float16 if device == "cuda" else torch.float32
 
-    if args.types is not None:
-        dmfft_params["types"] = int(args.types)
-        print(f"Using custom DMFFT type: {args.types}")
+    print("Loading '{}' on {} ({})...".format(MODEL, device, dtype))
+    pipe = _load_pipeline(MODEL, device, dtype, disable_safety_checker=False)
+    os.makedirs(OUT_DIR, exist_ok=True)
 
-    # Generate baseline
-    if not args.no_baseline:
-        print("Generating baseline image...")
-        _apply_dmfft(pipe, baseline_params)
-        torch.manual_seed(args.seed)
-        base_img = pipe(args.prompt, num_inference_steps=args.steps).images[0]
-        base_img.save(os.path.abspath(args.out_baseline))
-        print(f"Baseline saved to {args.out_baseline}")
+    saved = []
+    for i, prompt in enumerate(PROMPTS, start=1):
+        print("\n[{}/{}] {}".format(i, len(PROMPTS), prompt))
+        path = _run_prompt(
+            pipe=pipe, prompt=prompt, seed=SEED, steps=STEPS,
+            dmfft_params=dmfft_params, verbose=True,
+            out_dir=OUT_DIR, index=i,
+        )
+        saved.append(path)
 
-    # Generate DMFFT
-    print("Generating DMFFT enhanced image...")
-    _apply_dmfft(pipe, dmfft_params)
-    torch.manual_seed(args.seed)
-    dmfft_img = pipe(args.prompt, num_inference_steps=args.steps).images[0]
-    dmfft_img.save(os.path.abspath(args.out))
-    print(f"DMFFT image saved to {args.out}")
-
+    grid_path = _save_grid(saved, OUT_DIR)
+    print("\n[GRID] {}".format(grid_path))
+    print("Done. All images saved to '{}'.".format(os.path.abspath(OUT_DIR)))
 
 if __name__ == "__main__":
     main()
