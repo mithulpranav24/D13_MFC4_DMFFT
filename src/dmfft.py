@@ -425,6 +425,7 @@ def _run_prompt(pipe, prompt, seed, steps, dmfft_params, verbose, out_dir, index
 
 def main():
     PROMPTS = [
+        # --- Original 8 ---
         "a lone lighthouse on a rocky coast during a storm, dramatic lighting",
         "a Japanese tea ceremony in a bamboo garden, soft morning light",
         "a giant sea turtle swimming through a coral reef, underwater photography",
@@ -433,7 +434,89 @@ def main():
         "a wolf howling on a frozen tundra under the northern lights",
         "a close-up portrait of an old fisherman with weathered skin and kind eyes",
         "a child reading a glowing book in a dark enchanted forest",
+
+        # --- Nature & Wildlife (9-20) ---
+        "a red fox jumping through deep snow, mid-action, crisp winter sunlight",
+        "a macro shot of a dragonfly with iridescent wings covered in morning dew",
+        "an aerial view of a winding river through a dense autumn forest, fiery oranges and reds",
+        "a majestic lion resting under a baobab tree at sunset, golden hour",
+        "a field of lavender stretching to the horizon under a purple twilight sky",
+        "a massive thunderhead cloud illuminated by internal lightning over a desert",
+        "a tiny sprout breaking through scorched earth, soft bokeh background",
+        "a group of elephants crossing a dusty savanna, black and white fine art photography",
+        "a crystalline cave filled with glowing blue mushrooms and a subterranean lake",
+        "a hummingbird hovering near a hibiscus flower, high-speed photography",
+        "a misty redwood forest with god-rays filtering through the canopy",
+        "a pod of orcas jumping in the icy waters of Antarctica",
+
+        # --- Sci-Fi & Cyberpunk (21-32) ---
+        "a neon-drenched cyberpunk city street in the rain, reflections on puddles",
+        "a futuristic space station orbiting a ringed gas giant, cinematic scale",
+        "an android repair shop with spare parts and glowing wires, industrial aesthetic",
+        "a lonely astronaut sitting on the edge of a lunar crater, looking at Earth",
+        "a sleek hovercar parked in a brutalist concrete parking garage",
+        "a holographic billboard of a koi fish swimming through a crowded futuristic plaza",
+        "an overgrown post-apocalyptic New York City, nature reclaiming skyscrapers",
+        "a modular colony on the surface of Mars during a dust storm",
+        "a cyborg hand holding a delicate real rose, high contrast",
+        "a sprawling megacity with flying transport drones, sunset lighting",
+        "a laboratory with a glowing fusion reactor in the center, high-tech",
+        "a retro-futuristic 1950s style rocket ship landing on a crystalline planet",
+
+        # --- Fantasy & Surrealism (33-45) ---
+        "a floating island with a waterfall cascading into the clouds",
+        "a majestic phoenix rising from a pile of golden ashes, embers flying",
+        "a library where the shelves are carved into the trunk of a giant ancient tree",
+        "a clockwork owl with brass gears and glowing amber eyes",
+        "a giant marble statue half-buried in a desert, ancient ruins vibe",
+        "a bridge made of woven moonlight connecting two mountain peaks",
+        "a secret garden hidden behind an ivy-covered stone wall, magical atmosphere",
+        "a potion shop filled with bubbling glass jars and colorful smoke",
+        "a knight in ornate silver armor standing before a sleeping dragon",
+        "a path made of playing cards winding through a surreal chessboard landscape",
+        "a transparent jellyfish floating in the air above a Victorian ballroom",
+        "a cathedral made entirely of stained glass, glowing from within",
+        "a person walking through a doorway that leads to a different galaxy",
+
+        # --- Architecture & Interiors (46-55) ---
+        "a cozy wooden cabin interior with a roaring fireplace and sheepskin rugs",
+        "a modern glass villa perched on a cliff edge overlooking the Mediterranean",
+        "the interior of a grand gothic cathedral, intricate stonework and shadows",
+        "an Art Deco cinema lobby with gold accents and velvet curtains",
+        "a minimalist Zen garden with raked sand and a single cherry blossom tree",
+        "a hidden speakeasy bar with leather booths and dim amber lighting",
+        "a Mediterranean village with white houses and blue doors, bright sunlight",
+        "a futuristic library with floating books and glowing aisles",
+        "a treehouse mansion spanning across three giant oak trees",
+        "a vibrant Moroccan courtyard with a central fountain and intricate tiling",
+
+        # --- Portraits & People (56-65) ---
+        "a portrait of a steampunk inventor with brass goggles and a leather apron",
+        "a ballet dancer captured in mid-leap, flour dust exploding around them",
+        "a street musician playing a violin in a busy London street, motion blur",
+        "a portrait of a nomadic warrior with facial paint and silver jewelry",
+        "a chef working in a high-end kitchen, steam and fire in the background",
+        "a person in a bright yellow raincoat standing on a foggy pier",
+        "an artisan glassblower shaping a glowing orb of molten glass",
+        "a portrait of a historical queen with a heavy golden crown and velvet robes",
+        "a diver exploring a sunken shipwreck, shadows and light rays",
+        "a silhouette of a hiker on a mountain peak at sunrise",
+
+        # --- Macro & Abstract (66-75) ---
+        "a macro shot of a human eye with a galaxy reflected in the pupil",
+        "swirls of colorful ink dropping into water, high resolution abstract",
+        "the intricate internal gears of a luxury watch, macro photography",
+        "molten gold flowing over black volcanic rock",
+        "a macro shot of a snowflake's unique geometric structure",
+        "an abstract grid of glowing fiber optic cables",
+        "a close-up of a butterfly wing, showing the microscopic scales",
+        "a splash of milk forming the shape of a crown, high-speed photography",
+        "the texture of a rusted iron gate with peeling turquoise paint",
+        "a field of bokeh lights in shades of blue and gold"
     ]
+
+    # Print the count to verify
+    print(f"Total prompts in list: {len(PROMPTS)}")
 
     SEED    = 880
     STEPS   = 25
