@@ -172,7 +172,7 @@ Plotted and compared the following figures:
 ### DMFFT Architecture
 
 <p align="center">
-  <img src="assets/dmfft_workflow.png" alt="DMFFT Single Run Flowchart" width="500"/>
+  <img src="assets/workflow.svg" alt="DMFFT Single Run Flowchart" width="500"/>
 </p>
 
 *Figure: DMFFT single run — both Baseline and DMFFT images generated in one pass using the same prompt and seed.*
